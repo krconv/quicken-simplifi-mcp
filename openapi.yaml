@@ -1,0 +1,744 @@
+openapi: 3.0.3
+info:
+  title: Quicken Simplifi Unofficial API (Focused)
+  version: 0.1.0
+  description: |
+    Endpoints observed in captured HAR traffic, trimmed to auth, categories, tags,
+    and transactions for transaction analysis/categorization workflows.
+servers:
+  - url: https://services.quicken.com
+security:
+  - bearerAuth: []
+    qcsDatasetId: []
+tags:
+  - name: auth
+  - name: categories
+  - name: tags
+  - name: transactions
+paths:
+  /oauth/authorize:
+    post:
+      tags: [auth]
+      summary: Authorize user credentials and request authorization code
+      operationId: oauthAuthorize
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OAuthAuthorizeRequest'
+      responses:
+        '201':
+          description: Authorization accepted (body was empty in capture)
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+
+  /oauth/token:
+    post:
+      tags: [auth]
+      summary: Exchange authorization code or refresh token for access token
+      operationId: oauthToken
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OAuthTokenRequest'
+      responses:
+        '200':
+          description: Token payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthTokenResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+
+  /categories:
+    get:
+      tags: [categories]
+      summary: List categories
+      operationId: listCategories
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/ModifiedAfter'
+      responses:
+        '200':
+          description: Category list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CategoryListResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+
+  /tags:
+    get:
+      tags: [tags]
+      summary: List tags
+      operationId: listTags
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/ModifiedAfter'
+      responses:
+        '200':
+          description: Tag list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TagListResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+
+  /transactions:
+    get:
+      tags: [transactions]
+      summary: List transactions
+      operationId: listTransactions
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/DateOnAfter'
+        - $ref: '#/components/parameters/ModifiedAfter'
+        - $ref: '#/components/parameters/AfterCursor'
+        - $ref: '#/components/parameters/CurrentPage'
+      responses:
+        '200':
+          description: Transaction list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionListResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+
+  /transactions/earliest-date-on:
+    post:
+      tags: [transactions]
+      summary: Get earliest transaction date for account subset
+      operationId: getEarliestTransactionDateOn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EarliestDateOnRequest'
+      responses:
+        '200':
+          description: Earliest date
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EarliestDateOnResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+
+  /transactions/{transactionId}:
+    put:
+      tags: [transactions]
+      summary: Update a transaction (observed as full-object upsert)
+      operationId: updateTransaction
+      parameters:
+        - $ref: '#/components/parameters/TransactionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionUpsertRequest'
+      responses:
+        '200':
+          description: Update result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionMutationResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    qcsDatasetId:
+      type: apiKey
+      in: header
+      name: qcs-dataset-id
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      description: Page size observed as 5000 in capture
+      schema:
+        type: integer
+        minimum: 1
+    ModifiedAfter:
+      name: modifiedAfter
+      in: query
+      description: Incremental sync marker
+      schema:
+        type: string
+        format: date-time
+    DateOnAfter:
+      name: dateOnAfter
+      in: query
+      description: Include transactions posted on/after this date
+      schema:
+        type: string
+        format: date
+    AfterCursor:
+      name: after
+      in: query
+      description: Cursor observed as `dateOn;{date};{refId}`
+      schema:
+        type: string
+    CurrentPage:
+      name: currentPage
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+    TransactionId:
+      name: transactionId
+      in: path
+      required: true
+      schema:
+        type: string
+
+  responses:
+    ErrorResponse:
+      description: Error response (shape varies)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    OAuthAuthorizeRequest:
+      type: object
+      required:
+        - clientId
+        - username
+        - password
+        - redirectUri
+        - responseType
+      properties:
+        clientId:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+          format: password
+        redirectUri:
+          type: string
+          format: uri
+        responseType:
+          type: string
+        mfaChannel:
+          type: string
+          nullable: true
+        mfaCode:
+          type: string
+          nullable: true
+        threatMetrixRequestId:
+          type: string
+          nullable: true
+        threatMetrixSessionId:
+          type: string
+          nullable: true
+      additionalProperties: true
+
+    OAuthTokenRequest:
+      oneOf:
+        - $ref: '#/components/schemas/OAuthTokenAuthorizationCodeRequest'
+        - $ref: '#/components/schemas/OAuthTokenRefreshRequest'
+
+    OAuthTokenAuthorizationCodeRequest:
+      type: object
+      required:
+        - grantType
+        - clientId
+        - clientSecret
+        - code
+        - redirectUri
+      properties:
+        grantType:
+          type: string
+          enum: [authorization_code]
+        clientId:
+          type: string
+        clientSecret:
+          type: string
+        code:
+          type: string
+        redirectUri:
+          type: string
+          format: uri
+        responseType:
+          type: string
+      additionalProperties: true
+
+    OAuthTokenRefreshRequest:
+      type: object
+      required:
+        - grantType
+        - clientId
+        - clientSecret
+        - refreshToken
+        - redirectUri
+      properties:
+        grantType:
+          type: string
+          enum: [refreshToken]
+        clientId:
+          type: string
+        clientSecret:
+          type: string
+        refreshToken:
+          type: string
+        redirectUri:
+          type: string
+          format: uri
+        responseType:
+          type: string
+      additionalProperties: true
+
+    OAuthTokenResponse:
+      type: object
+      properties:
+        token_type:
+          type: string
+        access_token:
+          type: string
+        expires_in:
+          type: integer
+        refresh_token:
+          type: string
+        tokenType:
+          type: string
+        accessToken:
+          type: string
+        accessTokenExpired:
+          type: string
+          format: date-time
+        refreshToken:
+          type: string
+        refreshTokenExpired:
+          type: string
+          format: date-time
+        scope:
+          type: string
+        surveyRequested:
+          type: boolean
+        syncSurveyRequested:
+          type: boolean
+      additionalProperties: true
+
+    MetaData:
+      type: object
+      properties:
+        asOf:
+          type: string
+          format: date-time
+        currentPage:
+          type: integer
+        lastRefId:
+          type: string
+        limit:
+          type: integer
+        nextLink:
+          type: string
+        offset:
+          type: integer
+        pageSize:
+          type: integer
+        totalPages:
+          type: integer
+        totalSize:
+          type: integer
+      additionalProperties: true
+
+    CategoryListResponse:
+      type: object
+      required:
+        - metaData
+        - resources
+      properties:
+        metaData:
+          $ref: '#/components/schemas/MetaData'
+        resources:
+          type: array
+          items:
+            $ref: '#/components/schemas/Category'
+
+    TagListResponse:
+      type: object
+      required:
+        - metaData
+        - resources
+      properties:
+        metaData:
+          $ref: '#/components/schemas/MetaData'
+        resources:
+          type: array
+          items:
+            $ref: '#/components/schemas/Tag'
+
+    TransactionListResponse:
+      type: object
+      required:
+        - metaData
+        - resources
+      properties:
+        metaData:
+          $ref: '#/components/schemas/MetaData'
+        resources:
+          type: array
+          items:
+            $ref: '#/components/schemas/Transaction'
+
+    Category:
+      type: object
+      properties:
+        id:
+          type: string
+        clientId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        modifiedAt:
+          type: string
+          format: date-time
+        dbVersion:
+          type: integer
+        parentId:
+          type: string
+        categoryType:
+          type: string
+        usageType:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        isBusiness:
+          type: boolean
+        isInvestment:
+          type: boolean
+        isNotEditable:
+          type: boolean
+        isNotUserAssignable:
+          type: boolean
+        isExcludedFromBudgets:
+          type: boolean
+        isExcludedFromCategoryList:
+          type: boolean
+        isExcludedFromReports:
+          type: boolean
+        txfId:
+          type: string
+        knownCategoryId:
+          type: string
+        knownCategoryIds:
+          type: array
+          items:
+            type: string
+        fdsCategoryId:
+          type: string
+        fdsCategoryIds:
+          type: array
+          items:
+            type: string
+        plaidCategoryIds:
+          type: array
+          items:
+            type: string
+        finicityCategoryIds:
+          type: array
+          items:
+            type: string
+        finicityCategories:
+          type: array
+          items:
+            type: string
+        logoUrl:
+          type: string
+          format: uri
+        logoBackgroundColor:
+          type: string
+      additionalProperties: true
+
+    Tag:
+      type: object
+      properties:
+        id:
+          type: string
+        clientId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        modifiedAt:
+          type: string
+          format: date-time
+        userModifiedAt:
+          type: string
+          format: date-time
+        dbVersion:
+          type: integer
+        name:
+          type: string
+        type:
+          type: string
+        numberOfUses:
+          type: integer
+      additionalProperties: true
+
+    CoaRef:
+      type: object
+      properties:
+        type:
+          type: string
+        id:
+          type: string
+      additionalProperties: true
+
+    CheckData:
+      type: object
+      properties:
+        number:
+          type: string
+        memo:
+          type: string
+      additionalProperties: true
+
+    Transaction:
+      type: object
+      properties:
+        id:
+          type: string
+        clientId:
+          type: string
+        userModifiedAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        modifiedAt:
+          type: string
+          format: date-time
+        dbVersion:
+          type: integer
+        source:
+          type: string
+        accountId:
+          type: string
+        postedOn:
+          type: string
+          format: date
+        payee:
+          type: string
+        renamedPayee:
+          type: string
+        memo:
+          type: string
+        coa:
+          $ref: '#/components/schemas/CoaRef'
+        amount:
+          type: number
+        state:
+          type: string
+        matchState:
+          type: string
+        type:
+          type: string
+        subtype:
+          type: string
+        knownCategoryId:
+          type: string
+        mlKnownCategoryId:
+          type: integer
+        mlInferredPayee:
+          type: string
+        cpData:
+          type: object
+          additionalProperties: true
+        tags:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        attachments:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        check:
+          $ref: '#/components/schemas/CheckData'
+        split:
+          type: object
+          nullable: true
+          additionalProperties: true
+        transfer:
+          type: object
+          additionalProperties: true
+        allocations:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        matchedTxn:
+          type: object
+          additionalProperties: true
+        linkedItem:
+          type: object
+          additionalProperties: true
+        subtypeRelatedTxn:
+          type: object
+          additionalProperties: true
+        investmentTxnType:
+          type: string
+        localSecurityId:
+          type: string
+        securityId:
+          type: string
+        securityIdType:
+          type: string
+        symbol:
+          type: string
+        units:
+          type: number
+        transactionRuleId:
+          type: integer
+        userFlag:
+          type: string
+        prematchedAmount:
+          type: number
+        prematchedDateOn:
+          type: string
+          format: date
+        stModelId:
+          type: string
+        stDueOn:
+          type: string
+          format: date
+        ebillId:
+          type: string
+        ebillAmount:
+          type: number
+        ebillDueOn:
+          type: string
+          format: date
+        isBill:
+          type: boolean
+        isBillable:
+          type: boolean
+        isSubscription:
+          type: boolean
+        isReviewed:
+          type: boolean
+        isExcludedFromF2S:
+          type: boolean
+        isExcludedFromReports:
+          type: boolean
+        isDeleted:
+          type: boolean
+        businessId:
+          type: string
+        customerId:
+          type: string
+          nullable: true
+        projectId:
+          type: string
+          nullable: true
+      additionalProperties: true
+
+    TransactionUpsertRequest:
+      allOf:
+        - $ref: '#/components/schemas/Transaction'
+        - type: object
+          required:
+            - id
+            - clientId
+            - accountId
+            - postedOn
+            - payee
+            - coa
+            - amount
+            - state
+            - matchState
+            - source
+            - type
+
+    EarliestDateOnRequest:
+      type: object
+      required:
+        - accountIds
+      properties:
+        accountIds:
+          type: array
+          items:
+            type: string
+      additionalProperties: false
+
+    EarliestDateOnResponse:
+      type: object
+      required:
+        - dateOn
+      properties:
+        dateOn:
+          type: string
+          format: date
+      additionalProperties: true
+
+    TransactionMutationResponse:
+      type: object
+      properties:
+        clientId:
+          type: string
+        id:
+          type: string
+        status:
+          type: string
+        explanation:
+          type: string
+      additionalProperties: true
+
+    Error:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        status:
+          type: integer
+        error:
+          type: string
+        message:
+          type: string
+        path:
+          type: string
+      additionalProperties: true
