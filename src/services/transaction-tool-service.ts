@@ -3,6 +3,7 @@ import type { Transaction, TransactionFilters } from "../types.js";
 import { deepMerge } from "../utils.js";
 import { SimplifiClient } from "../simplifi/client.js";
 import { SyncService } from "../sync/sync-service.js";
+import { ReferenceDataService } from "./reference-data-service.js";
 
 export interface ListTransactionsInput extends TransactionFilters {
   limit?: number;
@@ -32,6 +33,7 @@ export class TransactionToolService {
     private readonly db: DatabaseContext,
     private readonly syncService: SyncService,
     private readonly simplifiClient: SimplifiClient,
+    private readonly referenceDataService: ReferenceDataService,
     private readonly maxStaleMs: number,
   ) {}
 
@@ -104,6 +106,97 @@ export class TransactionToolService {
     };
   }
 
+  public async categorizeTransaction(input: { transactionId: string; categoryId: string }): Promise<Record<string, unknown>> {
+    return this.updateTransaction({
+      transactionId: input.transactionId,
+      patch: {
+        coa: { type: "CATEGORY", id: input.categoryId },
+      },
+    });
+  }
+
+  public async listUncategorizedTransactions(input: ListTransactionsInput): Promise<Record<string, unknown>> {
+    await this.maybeRefresh(input.refresh ?? false);
+
+    const page = this.db.listUncategorizedTransactions(this.toQuery(input));
+    return {
+      total: page.total,
+      nextCursor: page.nextCursor,
+      items: page.items,
+    };
+  }
+
+  public async searchMerchants(input: { query: string; limit?: number; includeDeleted?: boolean }): Promise<Record<string, unknown>> {
+    await this.syncService.ensureFresh(this.maxStaleMs);
+    const merchants = this.db.searchMerchants({ q: input.query, limit: input.limit, includeDeleted: input.includeDeleted });
+    return { merchants };
+  }
+
+  public async listCategories(input?: { refresh?: boolean; limit?: number }): Promise<Record<string, unknown>> {
+    if (input?.refresh) {
+      await this.referenceDataService.syncCategories();
+    } else {
+      await this.referenceDataService.ensureCategoriesFresh(this.maxStaleMs);
+    }
+
+    const categories = this.db.listCategories({ limit: input?.limit });
+    return { categories };
+  }
+
+  public async searchCategories(input: { query: string; limit?: number; refresh?: boolean }): Promise<Record<string, unknown>> {
+    if (input.refresh) {
+      await this.referenceDataService.syncCategories();
+    } else {
+      await this.referenceDataService.ensureCategoriesFresh(this.maxStaleMs);
+    }
+
+    const categories = this.db.listCategories({ search: input.query, limit: input.limit });
+    return { categories };
+  }
+
+  public async listTags(input?: { refresh?: boolean; limit?: number }): Promise<Record<string, unknown>> {
+    if (input?.refresh) {
+      await this.referenceDataService.syncTags();
+    } else {
+      await this.referenceDataService.ensureTagsFresh(this.maxStaleMs);
+    }
+
+    const tags = this.db.listTags({ limit: input?.limit });
+    return { tags };
+  }
+
+  public async searchTags(input: { query: string; limit?: number; refresh?: boolean }): Promise<Record<string, unknown>> {
+    if (input.refresh) {
+      await this.referenceDataService.syncTags();
+    } else {
+      await this.referenceDataService.ensureTagsFresh(this.maxStaleMs);
+    }
+
+    const tags = this.db.listTags({ search: input.query, limit: input.limit });
+    return { tags };
+  }
+
+  public async suggestCategoriesForMerchant(input: {
+    merchant: string;
+    limit?: number;
+    matchMode?: "exact" | "contains";
+    refreshCategories?: boolean;
+  }): Promise<Record<string, unknown>> {
+    if (input.refreshCategories) {
+      await this.referenceDataService.syncCategories();
+    } else {
+      await this.referenceDataService.ensureCategoriesFresh(this.maxStaleMs);
+    }
+
+    const suggestions = this.db.suggestCategoriesForMerchant({
+      merchant: input.merchant,
+      limit: input.limit,
+      matchMode: input.matchMode,
+    });
+
+    return { suggestions };
+  }
+
   private async maybeRefresh(forceRefresh: boolean): Promise<void> {
     if (forceRefresh) {
       await this.syncService.syncIncremental();
@@ -138,7 +231,6 @@ export class TransactionToolService {
   private assertUpsertRequiredFields(transaction: Transaction): void {
     const requiredKeys = [
       "id",
-      "clientId",
       "accountId",
       "postedOn",
       "payee",

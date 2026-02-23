@@ -9,17 +9,14 @@ import type { AppConfig } from "../config.js";
 import { logInfo, logWarn } from "../logger.js";
 import { createMcpServer } from "../mcp/server.js";
 import { OAuthService } from "../oauth/oauth-service.js";
+import { SimplifiAuthService } from "../simplifi/auth-service.js";
 import { TransactionToolService } from "../services/transaction-tool-service.js";
 
 interface HttpServerDeps {
   config: AppConfig;
   oauthService: OAuthService;
+  simplifiAuthService: SimplifiAuthService;
   toolService: TransactionToolService;
-}
-
-interface McpSession {
-  transport: StreamableHTTPServerTransport;
-  sessionId: string;
 }
 
 export interface RunningHttpServer {
@@ -48,20 +45,11 @@ function readBearerToken(req: Request): string | null {
   return token.length > 0 ? token : null;
 }
 
-function isInitializePayload(body: unknown): boolean {
-  if (!body || typeof body !== "object") {
-    return false;
-  }
-
-  const payload = body as Record<string, unknown>;
-  return payload.jsonrpc === "2.0" && payload.method === "initialize";
-}
-
 export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttpServer> {
-  const { config, oauthService, toolService } = deps;
+  const { config, oauthService, simplifiAuthService, toolService } = deps;
 
   const app = express();
-  const sessions = new Map<string, McpSession>();
+  const sessions = new Map<string, StreamableHTTPServerTransport>();
 
   app.disable("x-powered-by");
   app.use(
@@ -94,7 +82,12 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
     }
   });
 
-  app.post("/oauth/authorize", (req, res) => {
+  app.post("/oauth/register", (req, res) => {
+    const response = oauthService.buildClientRegistrationResponse(toRecord(req.body), config.server.publicBaseUrl);
+    res.status(201).json(response);
+  });
+
+  app.post("/oauth/authorize", async (req, res) => {
     try {
       const request = oauthService.parseAuthorizeRequest(toRecord(req.body));
       const username = typeof req.body.username === "string" ? req.body.username : "";
@@ -105,11 +98,60 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
         return;
       }
 
+      const result = await simplifiAuthService.attemptLogin();
+
+      if (result.status === "mfa_required") {
+        res
+          .status(200)
+          .type("html")
+          .send(oauthService.buildMfaPage(request, result.pendingId, result));
+        return;
+      }
+
       const code = oauthService.issueAuthorizationCode(request);
       const redirect = oauthService.buildAuthorizeRedirect(request, code);
       res.redirect(302, redirect);
     } catch (error) {
       res.status(400).type("text/plain").send(error instanceof Error ? error.message : "Invalid authorize request");
+    }
+  });
+
+  app.post("/oauth/mfa", async (req, res) => {
+    try {
+      const request = oauthService.parseAuthorizeRequest(toRecord(req.body));
+      const pendingId = typeof req.body.pending_mfa_id === "string" ? req.body.pending_mfa_id : "";
+      const mfaCode = typeof req.body.mfa_code === "string" ? req.body.mfa_code.trim() : "";
+
+      if (!pendingId || !mfaCode) {
+        res.status(400).type("text/plain").send("Missing pending_mfa_id or mfa_code");
+        return;
+      }
+
+      try {
+        await simplifiAuthService.completeMfaLogin(pendingId, mfaCode);
+      } catch (mfaError) {
+        const mfaInfo = simplifiAuthService.getPendingMfaInfo(pendingId) ?? {
+          mfaChannel: "EMAIL",
+        };
+        res
+          .status(200)
+          .type("html")
+          .send(
+            oauthService.buildMfaPage(
+              request,
+              pendingId,
+              mfaInfo,
+              mfaError instanceof Error ? mfaError.message : "Verification failed. Please try again.",
+            ),
+          );
+        return;
+      }
+
+      const code = oauthService.issueAuthorizationCode(request);
+      const redirect = oauthService.buildAuthorizeRedirect(request, code);
+      res.redirect(302, redirect);
+    } catch (error) {
+      res.status(400).type("text/plain").send(error instanceof Error ? error.message : "Invalid MFA request");
     }
   });
 
@@ -143,74 +185,35 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
     }
   };
 
-  app.post("/mcp", requireAccessToken, async (req, res) => {
+  // Handle all MCP requests (GET for SSE, POST for JSON-RPC, DELETE for session close).
+  // A new McpServer+transport pair is created per session; the transport itself validates
+  // session IDs and whether the first request is an initialize — no manual pre-checks needed.
+  app.all("/mcp", requireAccessToken, async (req, res) => {
     const sessionId = req.header("mcp-session-id");
-    const existing = sessionId ? sessions.get(sessionId) : undefined;
+    let transport = sessionId ? sessions.get(sessionId) : undefined;
 
     try {
-      if (existing) {
-        await (existing.transport as any).handleRequest(req, res, req.body);
-        return;
-      }
-
-      if (sessionId) {
-        res.status(404).json({ error: "invalid_session", error_description: "Session not found" });
-        return;
-      }
-
-      if (!isInitializePayload(req.body)) {
-        res.status(400).json({ error: "invalid_request", error_description: "Expected initialize request" });
-        return;
-      }
-
-      const mcpServer = createMcpServer(toolService);
-      let boundSessionId = "";
-      const transport = new StreamableHTTPServerTransport(
-        {
+      if (!transport) {
+        const mcpServer = createMcpServer(toolService);
+        transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId: string) => {
-            boundSessionId = newSessionId;
-            sessions.set(newSessionId, { transport, sessionId: newSessionId });
+            sessions.set(newSessionId, transport!);
           },
-        } as any,
-      );
+        });
 
-      (transport as any).onclose = async () => {
-        if (boundSessionId) {
-          sessions.delete(boundSessionId);
-        }
-      };
+        transport.onclose = () => {
+          if (transport!.sessionId) {
+            sessions.delete(transport!.sessionId);
+          }
+        };
 
-      await mcpServer.connect(transport);
-      await (transport as any).handleRequest(req, res, req.body);
-    } catch (error) {
-      logWarn("Error handling POST /mcp", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-
-      if (!res.headersSent) {
-        res.status(500).json({ error: "internal_error", error_description: "Failed to handle MCP request" });
+        await mcpServer.connect(transport);
       }
-    }
-  });
 
-  const handleSessionRequest = async (req: Request, res: Response): Promise<void> => {
-    const sessionId = req.header("mcp-session-id");
-    if (!sessionId) {
-      res.status(400).json({ error: "invalid_request", error_description: "Missing mcp-session-id header" });
-      return;
-    }
-
-    const session = sessions.get(sessionId);
-    if (!session) {
-      res.status(404).json({ error: "invalid_session", error_description: "Session not found" });
-      return;
-    }
-
-    try {
-      await (session.transport as any).handleRequest(req, res);
+      await transport.handleRequest(req, res, req.body);
     } catch (error) {
-      logWarn("Error handling MCP session request", {
+      logWarn("Error handling /mcp request", {
         error: error instanceof Error ? error.message : String(error),
         method: req.method,
       });
@@ -219,14 +222,6 @@ export async function startHttpServer(deps: HttpServerDeps): Promise<RunningHttp
         res.status(500).json({ error: "internal_error", error_description: "Failed to handle MCP request" });
       }
     }
-  };
-
-  app.get("/mcp", requireAccessToken, async (req, res) => {
-    await handleSessionRequest(req, res);
-  });
-
-  app.delete("/mcp", requireAccessToken, async (req, res) => {
-    await handleSessionRequest(req, res);
   });
 
   app.get("/", (_req, res) => {

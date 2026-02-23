@@ -7,6 +7,12 @@ It provides MCP tools:
 - `search_transactions`
 - `get_transaction`
 - `update_transaction`
+- `categorize_transaction`
+- `list_uncategorized_transactions`
+- `search_merchants`
+- `list_categories` / `search_categories`
+- `list_tags` / `search_tags`
+- `suggest_categories_for_merchant`
 
 It includes:
 - local transaction cache (SQLite)
@@ -137,6 +143,57 @@ Inputs:
 - `patch` (required object)
 
 `update_transaction` merges `patch` into the cached transaction, validates required Simplifi upsert fields, sends `PUT /transactions/{transactionId}`, then resyncs.
+
+### `categorize_transaction`
+Inputs:
+- `transactionId` (required)
+- `categoryId` (required)
+
+Sets `coa.type=CATEGORY` and `coa.id=<categoryId>` via `update_transaction`.
+
+### `list_uncategorized_transactions`
+Inputs: same as `list_transactions`
+
+Returns transactions that appear uncategorized (typically `coa.type=UNCATEGORIZED` or `coa.id=0`).
+
+### `search_merchants`
+Inputs:
+- `query` (required)
+- `limit` (optional, 1-200)
+- `includeDeleted` (optional)
+
+Returns merchant name suggestions derived from cached transactions (grouped and counted).
+
+### `list_categories`
+Inputs:
+- `refresh` (optional)
+- `limit` (optional, 1-5000)
+
+### `search_categories`
+Inputs:
+- `query` (required)
+- `refresh` (optional)
+- `limit` (optional, 1-5000)
+
+### `list_tags`
+Inputs:
+- `refresh` (optional)
+- `limit` (optional, 1-5000)
+
+### `search_tags`
+Inputs:
+- `query` (required)
+- `refresh` (optional)
+- `limit` (optional, 1-5000)
+
+### `suggest_categories_for_merchant`
+Inputs:
+- `merchant` (required)
+- `limit` (optional, 1-20)
+- `matchMode` (optional: `exact` or `contains`)
+- `refreshCategories` (optional)
+
+Returns the most common categories historically used for that merchant in your cached transactions (joined to category names when available).
 
 ## Production Deployment
 

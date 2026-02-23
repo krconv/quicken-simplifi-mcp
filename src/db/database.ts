@@ -4,9 +4,11 @@ import path from "node:path";
 import BetterSqlite3 from "better-sqlite3";
 
 import type {
+  Category,
   SimplifiTokenRow,
   SimplifiTokenSet,
   SyncState,
+  Tag,
   Transaction,
   TransactionFilters,
   TransactionPage,
@@ -62,6 +64,35 @@ interface TransactionRow {
 
 interface CountRow {
   count: number;
+}
+
+interface MerchantRow {
+  merchant: string;
+  count: number;
+}
+
+interface CoaSuggestionRow {
+  coa_type: string | null;
+  coa_id: string | null;
+  count: number;
+  category_name: string | null;
+}
+
+interface CategoryRow {
+  raw_json: string;
+}
+
+interface TagRow {
+  raw_json: string;
+}
+
+export interface ReferenceSyncState {
+  id: number;
+  categoriesLastAsOf?: string;
+  categoriesLastSyncAt?: string;
+  tagsLastAsOf?: string;
+  tagsLastSyncAt?: string;
+  lastError?: string;
 }
 
 export class DatabaseContext {
@@ -148,6 +179,39 @@ export class DatabaseContext {
         revoked_at TEXT,
         created_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS categories (
+        id TEXT PRIMARY KEY,
+        parent_id TEXT,
+        name TEXT,
+        category_type TEXT,
+        usage_type TEXT,
+        modified_at TEXT,
+        raw_json TEXT NOT NULL,
+        cached_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_categories_name ON categories (name);
+      CREATE INDEX IF NOT EXISTS idx_categories_parent_id ON categories (parent_id);
+
+      CREATE TABLE IF NOT EXISTS tags (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        type TEXT,
+        modified_at TEXT,
+        raw_json TEXT NOT NULL,
+        cached_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_tags_name ON tags (name);
+
+      CREATE TABLE IF NOT EXISTS reference_sync_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        categories_last_as_of TEXT,
+        categories_last_sync_at TEXT,
+        tags_last_as_of TEXT,
+        tags_last_sync_at TEXT,
+        last_error TEXT
+      );
+      INSERT OR IGNORE INTO reference_sync_state (id) VALUES (1);
     `);
   }
 
@@ -398,6 +462,14 @@ export class DatabaseContext {
     });
   }
 
+  public listUncategorizedTransactions(query: TransactionQuery): TransactionPage {
+    return this.queryTransactions({
+      query,
+      searchTerm: undefined,
+      extraWhere: ["(coa_type IS NULL OR UPPER(coa_type) = 'UNCATEGORIZED' OR coa_id = '0')"],
+    });
+  }
+
   public searchTransactions(query: TransactionQuery & { searchTerm: string }): TransactionPage {
     return this.queryTransactions({
       query,
@@ -405,7 +477,7 @@ export class DatabaseContext {
     });
   }
 
-  private queryTransactions(args: { query: TransactionQuery; searchTerm?: string }): TransactionPage {
+  private queryTransactions(args: { query: TransactionQuery; searchTerm?: string; extraWhere?: string[] }): TransactionPage {
     const offset = decodeCursor(args.query.cursor);
     const limit = Math.min(Math.max(args.query.limit, 1), 200);
 
@@ -439,6 +511,10 @@ export class DatabaseContext {
 
     if (!args.query.includeDeleted) {
       where.push("is_deleted = 0");
+    }
+
+    if (args.extraWhere && args.extraWhere.length > 0) {
+      where.push(...args.extraWhere);
     }
 
     if (args.searchTerm && args.searchTerm.trim().length > 0) {
@@ -645,5 +721,345 @@ export class DatabaseContext {
     this.db
       .prepare(`UPDATE oauth_refresh_tokens SET revoked_at = ? WHERE token_hash = ?`)
       .run(nowIso(), sha256Base64Url(token));
+  }
+
+  public getReferenceSyncState(): ReferenceSyncState {
+    const row = this.db
+      .prepare(
+        `
+          SELECT
+            id,
+            categories_last_as_of,
+            categories_last_sync_at,
+            tags_last_as_of,
+            tags_last_sync_at,
+            last_error
+          FROM reference_sync_state
+          WHERE id = 1
+        `,
+      )
+      .get() as
+      | {
+          id: number;
+          categories_last_as_of: string | null;
+          categories_last_sync_at: string | null;
+          tags_last_as_of: string | null;
+          tags_last_sync_at: string | null;
+          last_error: string | null;
+        }
+      | undefined;
+
+    if (!row) {
+      return { id: 1 };
+    }
+
+    return {
+      id: row.id,
+      categoriesLastAsOf: row.categories_last_as_of ?? undefined,
+      categoriesLastSyncAt: row.categories_last_sync_at ?? undefined,
+      tagsLastAsOf: row.tags_last_as_of ?? undefined,
+      tagsLastSyncAt: row.tags_last_sync_at ?? undefined,
+      lastError: row.last_error ?? undefined,
+    };
+  }
+
+  public updateReferenceSyncState(patch: Partial<ReferenceSyncState>): void {
+    const current = this.getReferenceSyncState();
+    const next: ReferenceSyncState = { ...current, ...patch, id: 1 };
+
+    this.db
+      .prepare(
+        `
+          UPDATE reference_sync_state
+          SET
+            categories_last_as_of = @categoriesLastAsOf,
+            categories_last_sync_at = @categoriesLastSyncAt,
+            tags_last_as_of = @tagsLastAsOf,
+            tags_last_sync_at = @tagsLastSyncAt,
+            last_error = @lastError
+          WHERE id = 1
+        `,
+      )
+      .run({
+        categoriesLastAsOf: next.categoriesLastAsOf ?? null,
+        categoriesLastSyncAt: next.categoriesLastSyncAt ?? null,
+        tagsLastAsOf: next.tagsLastAsOf ?? null,
+        tagsLastSyncAt: next.tagsLastSyncAt ?? null,
+        lastError: next.lastError ?? null,
+      });
+  }
+
+  public upsertCategories(categories: Category[]): void {
+    if (categories.length === 0) {
+      return;
+    }
+
+    const statement = this.db.prepare(`
+      INSERT INTO categories (
+        id,
+        parent_id,
+        name,
+        category_type,
+        usage_type,
+        modified_at,
+        raw_json,
+        cached_at
+      ) VALUES (
+        @id,
+        @parentId,
+        @name,
+        @categoryType,
+        @usageType,
+        @modifiedAt,
+        @rawJson,
+        @cachedAt
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        parent_id = excluded.parent_id,
+        name = excluded.name,
+        category_type = excluded.category_type,
+        usage_type = excluded.usage_type,
+        modified_at = excluded.modified_at,
+        raw_json = excluded.raw_json,
+        cached_at = excluded.cached_at
+    `);
+
+    const run = this.db.transaction((items: Category[]) => {
+      const cachedAt = nowIso();
+      for (const item of items) {
+        const id = typeof item.id === "string" ? item.id : "";
+        if (!id) {
+          continue;
+        }
+
+        statement.run({
+          id,
+          parentId: typeof item.parentId === "string" ? item.parentId : null,
+          name: typeof item.name === "string" ? item.name : null,
+          categoryType: typeof item.categoryType === "string" ? item.categoryType : null,
+          usageType: typeof item.usageType === "string" ? item.usageType : null,
+          modifiedAt: typeof item.modifiedAt === "string" ? item.modifiedAt : null,
+          rawJson: JSON.stringify(item),
+          cachedAt,
+        });
+      }
+    });
+
+    run(categories);
+  }
+
+  public listCategories(query?: { search?: string; limit?: number }): Category[] {
+    const limit = Math.min(Math.max(query?.limit ?? 5000, 1), 5000);
+    const search = query?.search?.trim();
+
+    const rows = (search
+      ? (this.db
+          .prepare(
+            `
+              SELECT raw_json
+              FROM categories
+              WHERE LOWER(name) LIKE ?
+              ORDER BY name ASC
+              LIMIT ?
+            `,
+          )
+          .all(`%${search.toLowerCase()}%`, limit) as CategoryRow[])
+      : (this.db
+          .prepare(
+            `
+              SELECT raw_json
+              FROM categories
+              ORDER BY name ASC
+              LIMIT ?
+            `,
+          )
+          .all(limit) as CategoryRow[]));
+
+    return rows.map((row) => JSON.parse(row.raw_json) as Category);
+  }
+
+  public getCategoryById(id: string): Category | null {
+    const row = this.db.prepare(`SELECT raw_json FROM categories WHERE id = ?`).get(id) as CategoryRow | undefined;
+    return row ? (JSON.parse(row.raw_json) as Category) : null;
+  }
+
+  public upsertTags(tags: Tag[]): void {
+    if (tags.length === 0) {
+      return;
+    }
+
+    const statement = this.db.prepare(`
+      INSERT INTO tags (
+        id,
+        name,
+        type,
+        modified_at,
+        raw_json,
+        cached_at
+      ) VALUES (
+        @id,
+        @name,
+        @type,
+        @modifiedAt,
+        @rawJson,
+        @cachedAt
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        type = excluded.type,
+        modified_at = excluded.modified_at,
+        raw_json = excluded.raw_json,
+        cached_at = excluded.cached_at
+    `);
+
+    const run = this.db.transaction((items: Tag[]) => {
+      const cachedAt = nowIso();
+      for (const item of items) {
+        const id = typeof item.id === "string" ? item.id : "";
+        if (!id) {
+          continue;
+        }
+
+        statement.run({
+          id,
+          name: typeof item.name === "string" ? item.name : null,
+          type: typeof item.type === "string" ? item.type : null,
+          modifiedAt: typeof item.modifiedAt === "string" ? item.modifiedAt : null,
+          rawJson: JSON.stringify(item),
+          cachedAt,
+        });
+      }
+    });
+
+    run(tags);
+  }
+
+  public listTags(query?: { search?: string; limit?: number }): Tag[] {
+    const limit = Math.min(Math.max(query?.limit ?? 5000, 1), 5000);
+    const search = query?.search?.trim();
+
+    const rows = (search
+      ? (this.db
+          .prepare(
+            `
+              SELECT raw_json
+              FROM tags
+              WHERE LOWER(name) LIKE ?
+              ORDER BY name ASC
+              LIMIT ?
+            `,
+          )
+          .all(`%${search.toLowerCase()}%`, limit) as TagRow[])
+      : (this.db
+          .prepare(
+            `
+              SELECT raw_json
+              FROM tags
+              ORDER BY name ASC
+              LIMIT ?
+            `,
+          )
+          .all(limit) as TagRow[]));
+
+    return rows.map((row) => JSON.parse(row.raw_json) as Tag);
+  }
+
+  public searchMerchants(query: { q: string; limit?: number; includeDeleted?: boolean }): Array<{ merchant: string; count: number }> {
+    const q = query.q.trim().toLowerCase();
+    const limit = Math.min(Math.max(query.limit ?? 20, 1), 200);
+
+    const values: unknown[] = [];
+    const where: string[] = [
+      "merchant IS NOT NULL",
+      "merchant <> ''",
+      "LOWER(merchant) LIKE ?",
+    ];
+    values.push(`%${q}%`);
+
+    if (!query.includeDeleted) {
+      where.push("is_deleted = 0");
+    }
+
+    const sql = `
+      WITH base AS (
+        SELECT
+          COALESCE(NULLIF(renamed_payee,''), NULLIF(payee,''), NULLIF(ml_inferred_payee,'')) AS merchant,
+          is_deleted
+        FROM transactions
+      )
+      SELECT merchant, COUNT(*) AS count
+      FROM base
+      WHERE ${where.join(" AND ")}
+      GROUP BY merchant
+      ORDER BY count DESC, merchant ASC
+      LIMIT ?
+    `;
+
+    const rows = this.db.prepare(sql).all(...values, limit) as MerchantRow[];
+    return rows.map((row) => ({ merchant: row.merchant, count: row.count }));
+  }
+
+  public suggestCategoriesForMerchant(input: {
+    merchant: string;
+    limit?: number;
+    matchMode?: "exact" | "contains";
+    includeDeleted?: boolean;
+  }): Array<{ coaType: string; coaId: string; count: number; categoryName?: string }> {
+    const merchant = input.merchant.trim().toLowerCase();
+    const limit = Math.min(Math.max(input.limit ?? 5, 1), 20);
+    const matchMode = input.matchMode ?? "exact";
+
+    const predicate =
+      matchMode === "contains"
+        ? "LOWER(merchant) LIKE ?"
+        : "LOWER(merchant) = ?";
+
+    const value = matchMode === "contains" ? `%${merchant}%` : merchant;
+
+    const where: string[] = [
+      "merchant IS NOT NULL",
+      "merchant <> ''",
+      predicate,
+    ];
+
+    if (!input.includeDeleted) {
+      where.push("is_deleted = 0");
+    }
+
+    const sql = `
+      WITH base AS (
+        SELECT
+          COALESCE(NULLIF(renamed_payee,''), NULLIF(payee,''), NULLIF(ml_inferred_payee,'')) AS merchant,
+          coa_type,
+          coa_id,
+          is_deleted
+        FROM transactions
+      ),
+      grouped AS (
+        SELECT coa_type, coa_id, COUNT(*) AS count
+        FROM base
+        WHERE ${where.join(" AND ")}
+        GROUP BY coa_type, coa_id
+      )
+      SELECT
+        grouped.coa_type,
+        grouped.coa_id,
+        grouped.count,
+        categories.name AS category_name
+      FROM grouped
+      LEFT JOIN categories ON categories.id = grouped.coa_id
+      ORDER BY grouped.count DESC
+      LIMIT ?
+    `;
+
+    const rows = this.db.prepare(sql).all(value, limit) as CoaSuggestionRow[];
+    return rows
+      .filter((row) => typeof row.coa_type === "string" && typeof row.coa_id === "string")
+      .map((row) => ({
+        coaType: row.coa_type as string,
+        coaId: row.coa_id as string,
+        count: row.count,
+        categoryName: row.category_name ?? undefined,
+      }));
   }
 }

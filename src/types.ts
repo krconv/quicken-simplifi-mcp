@@ -11,6 +11,36 @@ export interface MetaData {
   [key: string]: unknown;
 }
 
+export interface Category {
+  id?: string;
+  parentId?: string;
+  categoryType?: string;
+  usageType?: string;
+  name?: string;
+  description?: string;
+  createdAt?: string;
+  modifiedAt?: string;
+  isBusiness?: boolean;
+  isInvestment?: boolean;
+  isNotEditable?: boolean;
+  isNotUserAssignable?: boolean;
+  isExcludedFromBudgets?: boolean;
+  isExcludedFromCategoryList?: boolean;
+  isExcludedFromReports?: boolean;
+  [key: string]: unknown;
+}
+
+export interface Tag {
+  id?: string;
+  name?: string;
+  type?: string;
+  createdAt?: string;
+  modifiedAt?: string;
+  userModifiedAt?: string;
+  numberOfUses?: number;
+  [key: string]: unknown;
+}
+
 export interface CoaRef {
   type?: string;
   id?: string;
@@ -44,6 +74,16 @@ export interface Transaction {
 export interface TransactionListResponse {
   metaData: MetaData;
   resources: Transaction[];
+}
+
+export interface CategoryListResponse {
+  metaData: MetaData;
+  resources: Category[];
+}
+
+export interface TagListResponse {
+  metaData: MetaData;
+  resources: Tag[];
 }
 
 export interface EarliestDateOnResponse {

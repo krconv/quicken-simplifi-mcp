@@ -4,6 +4,7 @@ import { startHttpServer } from "./http/server.js";
 import { logError, logInfo } from "./logger.js";
 import { OAuthService } from "./oauth/oauth-service.js";
 import { TransactionToolService } from "./services/transaction-tool-service.js";
+import { ReferenceDataService } from "./services/reference-data-service.js";
 import { SimplifiAuthService } from "./simplifi/auth-service.js";
 import { SimplifiClient } from "./simplifi/client.js";
 import { SyncService } from "./sync/sync-service.js";
@@ -26,10 +27,18 @@ async function main(): Promise<void> {
 
   syncService.start();
 
-  const toolService = new TransactionToolService(db, syncService, simplifiClient, config.simplifi.maxStaleMs);
+  const referenceDataService = new ReferenceDataService(config.simplifi, db, simplifiClient);
+  const toolService = new TransactionToolService(
+    db,
+    syncService,
+    simplifiClient,
+    referenceDataService,
+    config.simplifi.maxStaleMs,
+  );
   const httpServer = await startHttpServer({
     config,
     oauthService,
+    simplifiAuthService,
     toolService,
   });
 

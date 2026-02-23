@@ -55,11 +55,34 @@ export class OAuthService {
       issuer: this.config.issuer,
       authorization_endpoint: `${baseUrl}/oauth/authorize`,
       token_endpoint: `${baseUrl}/oauth/token`,
+      registration_endpoint: `${baseUrl}/oauth/register`,
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256", "plain"],
       token_endpoint_auth_methods_supported: ["none", "client_secret_post"],
       scopes_supported: ["mcp:read", "mcp:write"],
+    };
+  }
+
+  public buildClientRegistrationResponse(
+    raw: Record<string, unknown>,
+    baseUrl: string,
+  ): Record<string, unknown> {
+    const redirectUris = Array.isArray(raw.redirect_uris) ? raw.redirect_uris : [];
+    const grantTypes = Array.isArray(raw.grant_types)
+      ? raw.grant_types
+      : ["authorization_code", "refresh_token"];
+
+    // Single-user server: accept any registration and echo back a stable client_id.
+    // Real security is enforced by the username/password on the authorize page.
+    return {
+      client_id: "mcp-client",
+      client_id_issued_at: Math.floor(Date.now() / 1000),
+      redirect_uris: redirectUris,
+      grant_types: grantTypes,
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+      registration_client_uri: `${baseUrl}/oauth/register`,
     };
   }
 
@@ -122,6 +145,65 @@ export class OAuthService {
     }
 
     return redirect.toString();
+  }
+
+  public buildMfaPage(
+    request: AuthorizeRequest,
+    pendingId: string,
+    mfaInfo: { mfaChannel: string; email?: string; phone?: string },
+    errorMessage?: string,
+  ): string {
+    const hidden = {
+      response_type: request.responseType,
+      client_id: request.clientId,
+      redirect_uri: request.redirectUri,
+      state: request.state,
+      scope: request.scope,
+      code_challenge: request.codeChallenge,
+      code_challenge_method: request.codeChallengeMethod,
+      pending_mfa_id: pendingId,
+    };
+
+    const hiddenInputs = Object.entries(hidden)
+      .filter(([, value]) => value !== undefined)
+      .map(
+        ([key, value]) =>
+          `<input type="hidden" name="${this.escapeHtml(key)}" value="${this.escapeHtml(String(value))}" />`,
+      )
+      .join("\n");
+
+    const contact = mfaInfo.email
+      ? `email (${this.escapeHtml(mfaInfo.email)})`
+      : mfaInfo.phone
+        ? `phone (${this.escapeHtml(mfaInfo.phone)})`
+        : this.escapeHtml(mfaInfo.mfaChannel);
+
+    const errorSection = errorMessage
+      ? `<p style="color:#b91c1c;font-size:14px;">${this.escapeHtml(errorMessage)}</p>`
+      : "";
+
+    return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Simplifi MCP — MFA Required</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+  </head>
+  <body style="font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;background:#f8fafc;margin:0;padding:32px;">
+    <main style="max-width:420px;margin:0 auto;background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:24px;">
+      <h1 style="margin:0 0 8px 0;font-size:20px;">Two-Factor Verification</h1>
+      <p style="margin:0 0 16px 0;color:#475569;font-size:14px;">A verification code was sent to your ${contact}. Enter it below to continue.</p>
+      ${errorSection}
+      <form method="POST" action="/oauth/mfa">
+        ${hiddenInputs}
+        <label style="display:block;margin:0 0 8px 0;font-size:13px;color:#334155;">Verification Code</label>
+        <input type="text" name="mfa_code" inputmode="numeric" autocomplete="one-time-code" required autofocus
+          style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:16px;font-size:18px;letter-spacing:0.15em;" />
+        <button type="submit" style="width:100%;padding:10px 12px;border:0;border-radius:8px;background:#0f766e;color:white;font-weight:600;cursor:pointer;">Verify</button>
+      </form>
+    </main>
+  </body>
+</html>`;
   }
 
   public buildAuthorizePage(request: AuthorizeRequest, errorMessage?: string): string {

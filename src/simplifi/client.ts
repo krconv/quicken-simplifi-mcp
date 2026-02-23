@@ -2,7 +2,9 @@ import { URL } from "node:url";
 
 import type { AppConfig } from "../config.js";
 import type {
+  CategoryListResponse,
   EarliestDateOnResponse,
+  TagListResponse,
   Transaction,
   TransactionListResponse,
   TransactionMutationResponse,
@@ -15,6 +17,11 @@ interface ListTransactionsInput {
   modifiedAfter?: string;
   after?: string;
   currentPage?: number;
+}
+
+interface ListReferenceInput {
+  limit?: number;
+  modifiedAfter?: string;
 }
 
 export class SimplifiClient {
@@ -70,6 +77,34 @@ export class SimplifiClient {
       method: "PUT",
       body: JSON.stringify(payload),
     });
+  }
+
+  public async listCategories(input: ListReferenceInput = {}): Promise<CategoryListResponse> {
+    const url = new URL("/categories", this.config.baseUrl);
+    url.searchParams.set("limit", String(input.limit ?? 5000));
+    if (input.modifiedAfter) {
+      url.searchParams.set("modifiedAfter", input.modifiedAfter);
+    }
+    return this.authedRequest<CategoryListResponse>(url.toString(), { method: "GET" });
+  }
+
+  public async listCategoriesFromNextLink(nextLink: string): Promise<CategoryListResponse> {
+    const url = new URL(nextLink, this.config.baseUrl);
+    return this.authedRequest<CategoryListResponse>(url.toString(), { method: "GET" });
+  }
+
+  public async listTags(input: ListReferenceInput = {}): Promise<TagListResponse> {
+    const url = new URL("/tags", this.config.baseUrl);
+    url.searchParams.set("limit", String(input.limit ?? 5000));
+    if (input.modifiedAfter) {
+      url.searchParams.set("modifiedAfter", input.modifiedAfter);
+    }
+    return this.authedRequest<TagListResponse>(url.toString(), { method: "GET" });
+  }
+
+  public async listTagsFromNextLink(nextLink: string): Promise<TagListResponse> {
+    const url = new URL(nextLink, this.config.baseUrl);
+    return this.authedRequest<TagListResponse>(url.toString(), { method: "GET" });
   }
 
   private async authedRequest<T>(url: string, init: RequestInit): Promise<T> {
